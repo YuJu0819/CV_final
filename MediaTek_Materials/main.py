@@ -3,6 +3,7 @@ import cv2
 import os
 from tqdm import tqdm
 
+
 def main():
     # Example processing order
     processing_order = [
@@ -170,10 +171,12 @@ def main():
     for target_index, ref_index_0, ref_index_1 in tqdm(processing_order):
         target_frame = frames[target_index]
         reference_frames = [frames[ref_index_0], frames[ref_index_1]]
-        compensated_frame = apply_gmc(target_frame, reference_frames, target_index)
+        compensated_frame = apply_gmc(
+            target_frame, reference_frames, target_index)
         # interpolated_frame = interpolate_black_regions(compensated_frame)
         # Save or further process the compensated frame
-        cv2.imwrite(f'./processed_output/compensated_frame/{target_index}.png', compensated_frame)
+        cv2.imwrite(
+            f'./processed_output/compensated_frame/{target_index}.png', compensated_frame)
         # cv2.imwrite(f'./processed_output/compensated_frame/{target_index}.png', interpolated_frame)
 
     print("Processing complete.")
