@@ -1,7 +1,16 @@
-from utils import apply_gmc
+from utils import apply_gmc_with_segmentation
 import cv2
 import os
 from tqdm import tqdm
+import segmentation_models_pytorch as smp
+import torch
+import torchvision.transforms as transforms
+from PIL import Image
+
+def load_unet_model():
+    model = smp.Unet('resnet34', encoder_weights='imagenet', classes=1, activation='sigmoid')
+    model.eval()
+    return model
 
 def main():
     # Example processing order
@@ -146,7 +155,8 @@ def main():
     # Load YUV frames
     frames = []
     folder_path = './YUV_frames/'
-    for i in tqdm(range(129)):
+    # print('Loading luma frames...')
+    for i in tqdm(range(129), desc="Loading frames", unit="frame"):
         idx = str(i).zfill(3)
         img_pth = folder_path + idx + '.png'
 
@@ -167,11 +177,11 @@ def main():
     print()
 
     # Process frames based on hierarchical-B order
-    for target_index, ref_index_0, ref_index_1 in tqdm(processing_order):
+    for target_index, ref_index_0, ref_index_1 in tqdm(processing_order, desc="Processing frames", unit="frame"):
         # print(target_index, ref_index_0, ref_index_1)
         target_frame = frames[target_index]
         reference_frames = [frames[ref_index_0], frames[ref_index_1]]
-        compensated_frame = apply_gmc(target_frame, reference_frames, target_index)
+        compensated_frame = apply_gmc_with_segmentation(target_frame, reference_frames, target_index, model=unet_model)
         # interpolated_frame = interpolate_black_regions(compensated_frame)
         # Save or further process the compensated frame
         cv2.imwrite(f'./processed_output/compensated_frame/{target_index}.png', compensated_frame)
@@ -181,4 +191,6 @@ def main():
 
 
 if __name__ == '__main__':
+    # Load the U-Net model
+    unet_model = load_unet_model()
     main()

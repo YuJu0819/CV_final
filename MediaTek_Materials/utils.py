@@ -9,6 +9,10 @@ from skimage import img_as_float
 from skimage.measure import ransac
 from scipy.signal import convolve2d
 from tqdm import tqdm
+import segmentation_models_pytorch as smp
+import torch
+import torchvision.transforms as transforms
+from PIL import Image
 
 BLOCK_SIZE = 16
 
@@ -268,12 +272,41 @@ def illuminance_compensation(ref_block, tgt_block):
     compensation_factor = tgt_mean / ref_mean if ref_mean != 0 else 1
     return ref_block * compensation_factor
 
-# Function to apply global motion compensation with boundary handling
-def apply_gmc(target_frame, reference_frames, target_index):
+# Function to load the pre-trained U-Net model
+def load_unet_model():
+    model = smp.Unet('resnet34', encoder_weights='imagenet', classes=1, activation='sigmoid')
+    model.eval()
+    return model
+
+# Improved segmentation function using U-Net
+def segment_foreground_background(image, model):
+    # Transform the image to tensor
+    transform = transforms.Compose([
+        transforms.ToPILImage(),
+        transforms.Resize((256, 256)),
+        transforms.ToTensor(),
+        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+    ])
+    
+    # Convert grayscale to 3-channel
+    if len(image.shape) == 2:
+        image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+    
+    image_tensor = transform(image).unsqueeze(0)  # Add batch dimension
+    
+    with torch.no_grad():
+        mask = model(image_tensor)[0][0]  # Get the predicted mask
+    
+    mask = (mask > 0.5).numpy().astype('uint8') * 255  # Convert to binary mask
+    
+    return cv2.resize(mask, (image.shape[1], image.shape[0]))
+
+# Function to apply global motion compensation with boundary handling and segmentation
+def apply_gmc_with_segmentation(target_frame, reference_frames, target_index, model):
     h, w = target_frame.shape
     compensated_frame = np.zeros_like(target_frame)
 
-    # Derive a global motion model using the entire frame
+    # Derive global motion models using the entire frame
     affine_matrix_0 = derive_affine_motion_model(reference_frames[0], target_frame)
     perspective_matrix_0 = derive_perspective_motion_model(reference_frames[0], target_frame)
     affine_matrix_1 = derive_affine_motion_model(reference_frames[1], target_frame)
@@ -282,13 +315,19 @@ def apply_gmc(target_frame, reference_frames, target_index):
     if affine_matrix_0 is None or perspective_matrix_0 is None or affine_matrix_1 is None or perspective_matrix_1 is None:
         raise ValueError("Failed to derive motion models for the entire frame.")
 
+    # Segment the target frame into foreground and background
+    segmentation_mask = segment_foreground_background(target_frame, model)
+
+    # Save the segmentation mask for debugging/visualization
+    # segmentation_mask_filename = f'./processed_output/segmentation_masks/segmentation_mask_{target_index}.png'
+    # cv2.imwrite(segmentation_mask_filename, segmentation_mask)
+
     # Process each block in the frame
     blocks = divide_into_blocks(target_frame, block_size=16)
     selection_map, std_blocks = generate_selection_map(target_frame, block_size=16)
-    # selected_blocks = select_luma_blocks(blocks, target_frame, target_index, selection_map, std_blocks, num_blocks=13000)
     selected_blocks = blocks
 
-    for (i, j, block) in tqdm(selected_blocks):
+    for (i, j, block) in tqdm(selected_blocks, desc="Processing Blocks", unit="block"):
         ref_block_0 = reference_frames[0][i:i+block.shape[0], j:j+block.shape[1]]
         ref_block_1 = reference_frames[1][i:i+block.shape[0], j:j+block.shape[1]]
 
@@ -297,26 +336,33 @@ def apply_gmc(target_frame, reference_frames, target_index):
             print(f"Skipping block at ({i}, {j}) due to size mismatch.")
             continue
 
-        # Apply the interpolation filter (post-processing)
-        ref_block_0 = apply_interpolation_filter(ref_block_0, filter_index=5)  # Example filter index
-        ref_block_1 = apply_interpolation_filter(ref_block_1, filter_index=5)  # Example filter index
+        # Determine if the block is foreground or background
+        if np.mean(segmentation_mask[i:i+block.shape[0], j:j+block.shape[1]]) > 128:  # Foreground
+            # Apply the interpolation filter (post-processing)
+            ref_block_0 = apply_interpolation_filter(ref_block_0, filter_index=5)  # Example filter index
+            ref_block_1 = apply_interpolation_filter(ref_block_1, filter_index=5)  # Example filter index
 
-        # Apply illuminance compensation (post-processing)
-        ref_block_0 = illuminance_compensation(ref_block_0, block)
-        ref_block_1 = illuminance_compensation(ref_block_1, block)
+            # Apply illuminance compensation (post-processing)
+            ref_block_0 = illuminance_compensation(ref_block_0, block)
+            ref_block_1 = illuminance_compensation(ref_block_1, block)
 
-        # print(f"Block min/max before transform at ({i}, {j}):", block.min(), block.max())
-        compensated_block_affine_0 = apply_affine_transform(ref_block_0, affine_matrix_0)
-        compensated_block_perspective_0 = apply_perspective_transform(ref_block_0, perspective_matrix_0)
-        compensated_block_affine_1 = apply_affine_transform(ref_block_1, affine_matrix_1)
-        compensated_block_perspective_1 = apply_perspective_transform(ref_block_1, perspective_matrix_1)
+            # Apply affine and perspective transforms
+            compensated_block_affine_0 = apply_affine_transform(ref_block_0, affine_matrix_0)
+            compensated_block_perspective_0 = apply_perspective_transform(ref_block_0, perspective_matrix_0)
+            compensated_block_affine_1 = apply_affine_transform(ref_block_1, affine_matrix_1)
+            compensated_block_perspective_1 = apply_perspective_transform(ref_block_1, perspective_matrix_1)
 
-        # Blend the compensated blocks
-        final_blended_block_0 = (compensated_block_affine_0.astype(np.float32) + compensated_block_perspective_0.astype(np.float32)) / 2
-        final_blended_block_1 = (compensated_block_affine_1.astype(np.float32) + compensated_block_perspective_1.astype(np.float32)) / 2
-        final_blended_block = ((final_blended_block_0 + final_blended_block_1) / 2).astype(np.uint8)
+            # Blend the compensated blocks
+            final_blended_block_0 = (compensated_block_affine_0.astype(np.float32) + compensated_block_perspective_0.astype(np.float32)) / 2
+            final_blended_block_1 = (compensated_block_affine_1.astype(np.float32) + compensated_block_perspective_1.astype(np.float32)) / 2
+            final_blended_block = ((final_blended_block_0 + final_blended_block_1) / 2).astype(np.uint8)
+        else:  # Background
+            # Use only the affine transformation for the background
+            compensated_block_affine_0 = apply_affine_transform(ref_block_0, affine_matrix_0)
+            compensated_block_affine_1 = apply_affine_transform(ref_block_1, affine_matrix_1)
 
-        # print(f"Blended block at ({i}, {j}) min/max:", final_blended_block.min(), final_blended_block.max())
+            # Blend the compensated blocks
+            final_blended_block = ((compensated_block_affine_0.astype(np.float32) + compensated_block_affine_1.astype(np.float32)) / 2).astype(np.uint8)
 
         # Update the compensated frame
         compensated_frame[i:i+block.shape[0], j:j+block.shape[1]] = final_blended_block
@@ -325,4 +371,6 @@ def apply_gmc(target_frame, reference_frames, target_index):
     compensated_frame = deblocking_filter(compensated_frame)
 
     return compensated_frame
+
+
 
