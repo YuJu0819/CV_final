@@ -26,5 +26,5 @@ subtracted_image = cv2.subtract(image1, image2)
 # cv2.waitKey(0)
 # cv2.destroyAllWindows()
 
-# cv2.imwrite(f'./processed_output/{16}_sub.png', subtracted_image)
+cv2.imwrite(f'./processed_output/{16}_sub.png', subtracted_image)
 print(subtracted_image)

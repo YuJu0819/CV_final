@@ -168,6 +168,7 @@ def main():
 
     # Process frames based on hierarchical-B order
     for target_index, ref_index_0, ref_index_1 in tqdm(processing_order):
+        # print(target_index, ref_index_0, ref_index_1)
         target_frame = frames[target_index]
         reference_frames = [frames[ref_index_0], frames[ref_index_1]]
         compensated_frame = apply_gmc(target_frame, reference_frames, target_index)
