@@ -2,8 +2,8 @@ import cv2
 import numpy as np
 
 # Load the two images
-image1 = cv2.imread('./YUV_frames/016.png')
-image2 = cv2.imread('./processed_output/compensated_frame/16.png')
+image1 = cv2.imread('./YUV_frames/005.png')
+image2 = cv2.imread('./processed_output/compensated_frame/5.png')
 
 # Check if the images are loaded properly
 # if image1 is None:
@@ -26,5 +26,5 @@ subtracted_image = cv2.subtract(image1, image2)
 # cv2.waitKey(0)
 # cv2.destroyAllWindows()
 
-cv2.imwrite(f'./processed_output/{16}_sub.png', subtracted_image)
-print(subtracted_image)
+cv2.imwrite(f'./processed_output/{5}_sub.png', subtracted_image)
+# print(subtracted_image)

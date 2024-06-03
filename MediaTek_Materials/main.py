@@ -1,4 +1,4 @@
-from utils import apply_gmc_with_segmentation
+from utils import apply_gmc
 import cv2
 import os
 from tqdm import tqdm
@@ -11,6 +11,16 @@ def load_unet_model():
     model = smp.Unet('resnet34', encoder_weights='imagenet', classes=1, activation='sigmoid')
     model.eval()
     return model
+
+def load_prn_model():
+    model = PixelRestorationNetwork()
+    # model.load_state_dict(torch.load('path_to_pretrained_model.pth'))
+    model.eval()
+    return model
+
+def initialize_background_subtractor():
+    backSub = cv2.createBackgroundSubtractorMOG2(history=500, varThreshold=16, detectShadows=True)
+    return backSub
 
 def main():
     # Example processing order
@@ -156,7 +166,7 @@ def main():
     frames = []
     folder_path = './YUV_frames/'
     # print('Loading luma frames...')
-    for i in tqdm(range(129), desc="Loading frames", unit="frame"):
+    for i in tqdm(range(129), desc="Loading frames", unit="frames"):
         idx = str(i).zfill(3)
         img_pth = folder_path + idx + '.png'
 
@@ -167,21 +177,15 @@ def main():
         else:
             print(f'Warning: {img_pth} could not be loaded.')
 
-    # print('The length of frames:', len(frames))
-    # for i in range(3):
-    #     cv2.imshow(f'{i}', frames[i])
-    # # 按下任意鍵則關閉所有視窗
-    # cv2.waitKey(0)
-    # cv2.destroyAllWindows()
-
-    print()
+    print('-')
 
     # Process frames based on hierarchical-B order
-    for target_index, ref_index_0, ref_index_1 in tqdm(processing_order, desc="Processing frames", unit="frame"):
+    for target_index, ref_index_0, ref_index_1 in tqdm(processing_order, desc="Processing frames", unit="frames"):
         # print(target_index, ref_index_0, ref_index_1)
         target_frame = frames[target_index]
         reference_frames = [frames[ref_index_0], frames[ref_index_1]]
-        compensated_frame = apply_gmc_with_segmentation(target_frame, reference_frames, target_index, model=unet_model)
+        compensated_frame = apply_gmc(target_frame, reference_frames, target_index)
+        # compensated_frame = apply_gmc_with_segmentation(target_frame, reference_frames, target_index, model=backSub)
         # interpolated_frame = interpolate_black_regions(compensated_frame)
         # Save or further process the compensated frame
         cv2.imwrite(f'./processed_output/compensated_frame/{target_index}.png', compensated_frame)
@@ -192,5 +196,10 @@ def main():
 
 if __name__ == '__main__':
     # Load the U-Net model
-    unet_model = load_unet_model()
+    # unet_model = load_unet_model()
+    # backSub = initialize_background_subtractor()
+
+    # Load the PRN model
+    # prn_model = load_prn_model()
+
     main()

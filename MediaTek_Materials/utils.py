@@ -16,16 +16,6 @@ from PIL import Image
 
 BLOCK_SIZE = 16
 
-# Example function to load YUV frames
-def load_yuv_frames(filepath, width, height, num_frames):
-    frames = []
-    frame_size = width * height
-    with open(filepath, 'rb') as f:
-        for _ in range(num_frames):
-            y = np.frombuffer(f.read(frame_size), dtype=np.uint8).reshape((height, width))
-            frames.append(y)
-    return frames
-
 # Function to divide image into 16x16 blocks with boundary handling
 def divide_into_blocks(image, block_size=BLOCK_SIZE):
     blocks = []
@@ -33,7 +23,7 @@ def divide_into_blocks(image, block_size=BLOCK_SIZE):
     for i in range(0, h, block_size):
         for j in range(0, w, block_size):
             block = image[i:min(i+block_size, h), j:min(j+block_size, w)]
-            blocks.append((i, j, block))
+            blocks.append(((i, j), block))
     return blocks
 
 # Example function to generate a selection map (binary map indicating easy and difficult blocks)
@@ -112,13 +102,7 @@ def apply_interpolation_filter(block, filter_index):
 
     return np.clip(filtered_block, 0, 255).astype(np.uint8)
 
-def derive_affine_motion_model(ref_frame, tgt_frame):
-    # Convert to grayscale if not already
-    if len(ref_frame.shape) == 3:
-        ref_frame = cv2.cvtColor(ref_frame, cv2.COLOR_BGR2GRAY)
-    if len(tgt_frame.shape) == 3:
-        tgt_frame = cv2.cvtColor(tgt_frame, cv2.COLOR_BGR2GRAY)
-    
+def derive_affine_motion_model(ref_frame, tgt_frame):    
     # Enhance the frames to improve feature detection
     ref_frame = enhance_image(ref_frame)
     tgt_frame = enhance_image(tgt_frame)
@@ -160,35 +144,34 @@ def derive_affine_motion_model(ref_frame, tgt_frame):
                                    min_samples=3,
                                    residual_threshold=2,
                                    max_trials=100)
-    if model_robust is None:
-        # If RANSAC fails, return None
-        print("RANSAC failed to estimate the affine transformation.")
+    # Assuming model_robust is an AffineTransform object from skimage
+    if model_robust is not None:
+        return model_robust.params[:2, :].astype(np.float32)  # Ensure it is (2, 3) and float32
+    else:
         return None
 
-    # print("Affine transformation parameters:", model_robust.params)
-
-    return model_robust
-
 def apply_affine_transform(block, affine_transform):
-    # Convert AffineTransform to a format suitable for cv2.warpAffine
-    matrix = affine_transform.params[:2, :]  # Only take the first 2 rows for 2D transformation
-    
+    # Ensure the affine_transform is a numpy array of shape (2, 3) and type float32
+    matrix = np.array(affine_transform, dtype=np.float32)
+    assert matrix.shape == (2, 3), f"Affine transform matrix has invalid shape: {matrix.shape}"
+
     # Apply the affine transformation using OpenCV's warpAffine function
     h, w = block.shape
     transformed_block = cv2.warpAffine(block, matrix, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT_101)
-    
-    # print("Block min/max before transform:", block.min(), block.max())
-    # print("Transformed block min/max:", transformed_block.min(), transformed_block.max())
-
     return transformed_block
 
-def derive_perspective_motion_model(ref_frame, tgt_frame):
-    # Convert to grayscale if not already
-    if len(ref_frame.shape) == 3:
-        ref_frame = cv2.cvtColor(ref_frame, cv2.COLOR_BGR2GRAY)
-    if len(tgt_frame.shape) == 3:
-        tgt_frame = cv2.cvtColor(tgt_frame, cv2.COLOR_BGR2GRAY)
+# apply the affine motion model to the entire frame
+# def apply_affine_transform(frame, affine_transform):
+#     # Convert AffineTransform to a format suitable for cv2.warpAffine
+#     matrix = affine_transform.params[:2, :]  # Only take the first 2 rows for 2D transformation
     
+#     # Apply the affine transformation using OpenCV's warpAffine function
+#     h, w = frame.shape
+#     transformed_frame = cv2.warpAffine(frame, matrix, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT_101)
+    
+#     return transformed_frame
+
+def derive_perspective_motion_model(ref_frame, tgt_frame):    
     # Enhance the frames to improve feature detection
     ref_frame = enhance_image(ref_frame)
     tgt_frame = enhance_image(tgt_frame)
@@ -227,23 +210,62 @@ def derive_perspective_motion_model(ref_frame, tgt_frame):
     # Estimate the perspective transformation using RANSAC
     perspective_matrix, inliers = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
 
-    if perspective_matrix is None:
-        # If RANSAC fails, return None
-        print("RANSAC failed to estimate the perspective transformation.")
+    # Assuming perspective_matrix is the result of cv2.findHomography
+    if perspective_matrix is not None:
+        return perspective_matrix.astype(np.float32)  # Ensure it is float32
+    else:
         return None
-
-    # print("Perspective transformation matrix:\n", perspective_matrix)
-
-    return perspective_matrix
 
 def apply_perspective_transform(block, perspective_matrix):
     # Apply the perspective transformation using OpenCV's warpPerspective function
     h, w = block.shape
     transformed_block = cv2.warpPerspective(block, perspective_matrix, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT_101)
-    
-    # print("Block min/max before transform:", block.min(), block.max())
-    # print("Transformed block min/max:", transformed_block.min(), transformed_block.max())
+    return transformed_block
 
+def derive_projection_motion_model(ref_frame, tgt_frame):
+    # Enhance the frames to improve feature detection
+    ref_frame = enhance_image(ref_frame)
+    tgt_frame = enhance_image(tgt_frame)
+    
+    # Initialize the AKAZE detector
+    akaze = cv2.AKAZE_create()
+
+    # Find keypoints and descriptors with AKAZE in both frames
+    kp1, des1 = akaze.detectAndCompute(ref_frame, None)
+    kp2, des2 = akaze.detectAndCompute(tgt_frame, None)
+
+    if des1 is None or des2 is None or len(kp1) < 4 or len(kp2) < 4:
+        # No descriptors found or not enough keypoints
+        print("No descriptors found or not enough keypoints in one of the frames.")
+        return None
+
+    # Use BFMatcher to find the best matches
+    bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+    matches = bf.match(des1, des2)
+    matches = sorted(matches, key=lambda x: x.distance)
+
+    if len(matches) < 4:
+        # If there are not enough matches, return None
+        print("Not enough matches found.")
+        return None
+
+    # Extract location of good matches
+    src_pts = np.float32([kp1[m.queryIdx].pt for m in matches]).reshape(-1, 2)
+    dst_pts = np.float32([kp2[m.trainIdx].pt for m in matches]).reshape(-1, 2)
+
+    # Estimate the homography (projection model) using RANSAC
+    projection_matrix, inliers = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
+
+    if projection_matrix is not None:
+        return projection_matrix.astype(np.float32)  # Ensure it is float32
+    else:
+        print("RANSAC failed to estimate the projection transformation.")
+        return None
+
+def apply_projection_transform(block, projection_matrix):
+    # Apply the projection transformation using OpenCV's warpPerspective function
+    h, w = block.shape
+    transformed_block = cv2.warpPerspective(block, projection_matrix, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT_101)
     return transformed_block
 
 def enhance_image(image):
@@ -260,117 +282,235 @@ def enhance_image(image):
 
     return enhanced_image
 
-# Post-processing: De-blocking filter
-def deblocking_filter(image):
-    kernel = np.array([[1, 2, 1], [2, 4, 2], [1, 2, 1]], np.float32) / 16
-    return cv2.filter2D(image, -1, kernel)
+def calculate_edge_strength(block):
+    # Calculate gradient magnitudes using Sobel operator
+    grad_x = cv2.Sobel(block, cv2.CV_64F, 1, 0, ksize=3)
+    grad_y = cv2.Sobel(block, cv2.CV_64F, 0, 1, ksize=3)
+    grad_mag = np.sqrt(grad_x**2 + grad_y**2)
+    return np.mean(grad_mag)
+
+def adaptive_deblocking_filter(image, block_size=BLOCK_SIZE):
+    h, w = image.shape
+    filtered_image = np.copy(image)
+    
+    for i in range(0, h, block_size):
+        for j in range(0, w, block_size):
+            block = image[i:i+block_size, j:j+block_size]
+            edge_strength = calculate_edge_strength(block)
+            
+            # Adjust filtering strength based on edge strength
+            if edge_strength > 50:
+                filter_strength = 0.5  # Weak filtering for strong edges
+            else:
+                filter_strength = 1.0  # Strong filtering for weak edges
+            
+            # Apply horizontal and vertical deblocking filter
+            for k in range(block_size):
+                # Ensure the indices are within bounds
+                if i + k < h and j + block_size <= w:
+                    filtered_image[i + k, j:j + block_size] = cv2.GaussianBlur(
+                        image[i + k, j:j + block_size], (5, 5), filter_strength).reshape(-1)
+                if i + block_size <= h and j + k < w:
+                    filtered_image[i:i + block_size, j + k] = cv2.GaussianBlur(
+                        image[i:i + block_size, j + k], (5, 5), filter_strength).reshape(-1)
+    
+    return filtered_image
+
+# # Post-processing: De-blocking filter
+# def deblocking_filter(image):
+#     kernel = np.array([[1, 2, 1], [2, 4, 2], [1, 2, 1]], np.float32) / 16
+#     return cv2.filter2D(image, -1, kernel)
 
 # Post-processing: Illuminance compensation
 def illuminance_compensation(ref_block, tgt_block):
     ref_mean = np.mean(ref_block)
     tgt_mean = np.mean(tgt_block)
     compensation_factor = tgt_mean / ref_mean if ref_mean != 0 else 1
-    return ref_block * compensation_factor
+    return np.clip(ref_block * compensation_factor, 0, 255).astype(np.uint8)
 
-# Function to load the pre-trained U-Net model
-def load_unet_model():
-    model = smp.Unet('resnet34', encoder_weights='imagenet', classes=1, activation='sigmoid')
-    model.eval()
-    return model
+def derive_motion_models(ref_frame_0, ref_frame_1, tgt_frame):
+    models = []
 
-# Improved segmentation function using U-Net
-def segment_foreground_background(image, model):
-    # Transform the image to tensor
-    transform = transforms.Compose([
-        transforms.ToPILImage(),
-        transforms.Resize((256, 256)),
-        transforms.ToTensor(),
-        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
-    ])
-    
-    # Convert grayscale to 3-channel
-    if len(image.shape) == 2:
-        image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-    
-    image_tensor = transform(image).unsqueeze(0)  # Add batch dimension
-    
-    with torch.no_grad():
-        mask = model(image_tensor)[0][0]  # Get the predicted mask
-    
-    mask = (mask > 0.5).numpy().astype('uint8') * 255  # Convert to binary mask
-    
-    return cv2.resize(mask, (image.shape[1], image.shape[0]))
+    # Compute affine models
+    affine_model_0 = derive_affine_motion_model(ref_frame_0, tgt_frame)
+    affine_model_1 = derive_affine_motion_model(ref_frame_1, tgt_frame)
+    models.append(('affine', affine_model_0, affine_model_1))
 
-# Function to apply global motion compensation with boundary handling and segmentation
-def apply_gmc_with_segmentation(target_frame, reference_frames, target_index, model):
+    # Compute perspective models
+    perspective_model_0 = derive_perspective_motion_model(ref_frame_0, tgt_frame)
+    perspective_model_1 = derive_perspective_motion_model(ref_frame_1, tgt_frame)
+    models.append(('perspective', perspective_model_0, perspective_model_1))
+
+    # Compute projection models
+    projection_model_0 = derive_projection_motion_model(ref_frame_0, tgt_frame)
+    projection_model_1 = derive_projection_motion_model(ref_frame_1, tgt_frame)
+    models.append(('projection', projection_model_0, projection_model_1))
+
+    return models
+
+def select_best_models(models, target_frame, ref_frame_0, ref_frame_1, num_models=12):
+    evaluated_models = []
+
+    for model_type, model_0, model_1 in models:
+        if model_0 is not None and model_1 is not None:
+            # Apply models and blend the results
+            blended_frame = blend_models(target_frame, ref_frame_0, ref_frame_1, model_0, model_1)
+            # Evaluate the model (e.g., compute residual error or PSNR)
+            error = compute_residual_error(target_frame, blended_frame)
+            evaluated_models.append((model_type, model_0, model_1, error))
+
+    # Sort models by error and select the best 12 models
+    evaluated_models.sort(key=lambda x: x[3])
+    best_models = evaluated_models[:num_models]
+
+    return best_models
+
+def blend_models(target_frame, ref_frame_0, ref_frame_1, model_0, model_1, weight=0.5):
+
+    # classify the model matrices based on their shape
+    if isinstance(model_0, (AffineTransform, np.ndarray)) and model_0.shape == (2, 3):
+        compensated_frame_0 = apply_affine_transform(ref_frame_0, model_0)
+    elif isinstance(model_0, np.ndarray) and model_0.shape == (3, 3):
+        compensated_frame_0 = apply_projection_transform(ref_frame_0, model_0)
+    else:
+        compensated_frame_0 = apply_perspective_transform(ref_frame_0, model_0)
+
+    if isinstance(model_1, (AffineTransform, np.ndarray)) and model_1.shape == (2, 3):
+        compensated_frame_1 = apply_affine_transform(ref_frame_1, model_1)
+    elif isinstance(model_1, np.ndarray) and model_1.shape == (3, 3):
+        compensated_frame_1 = apply_projection_transform(ref_frame_1, model_1)
+    else:
+        compensated_frame_1 = apply_perspective_transform(ref_frame_1, model_1)
+
+    # Blend the compensated frames
+    blended_frame = (compensated_frame_0 * weight + compensated_frame_1 * (1 - weight)).astype(np.uint8)
+
+    return blended_frame
+
+def compute_residual_error(block, compensated_block):
+    # MSE
+    error = np.mean((block.astype(np.float32) - compensated_block.astype(np.float32)) ** 2)
+    return error
+
+def assign_models_to_blocks(blocks, best_models, target_frame, ref_frame_0, ref_frame_1):
+    assigned_models = []
+
+    for (block_pos, block) in blocks:
+        best_model = None
+        best_error = float('inf')
+
+        for model_type, model_0, model_1, error in best_models:
+            ref_block_0 = ref_frame_0[block_pos[0]:block_pos[0]+block.shape[0], block_pos[1]:block_pos[1]+block.shape[1]]
+            ref_block_1 = ref_frame_1[block_pos[0]:block_pos[0]+block.shape[0], block_pos[1]:block_pos[1]+block.shape[1]]
+
+            blended_block = blend_models(block, ref_block_0, ref_block_1, model_0, model_1)
+            block_error = compute_residual_error(block, blended_block)
+
+            if block_error < best_error:
+                best_error = block_error
+                best_model = (model_type, model_0, model_1)
+
+        assigned_models.append((block_pos, best_model))
+
+    return assigned_models
+
+def apply_obmc(compensated_frame, block_size=BLOCK_SIZE):
+    h, w = compensated_frame.shape
+    obmc_frame = np.zeros_like(compensated_frame, dtype=np.float32)
+    weights = np.zeros_like(compensated_frame, dtype=np.float32)
+
+    # Define the weight mask for blending
+    weight_mask = np.ones((block_size, block_size), dtype=np.float32)
+    weight_mask[1:-1, 1:-1] = 4
+    weight_mask = weight_mask / weight_mask.sum()
+
+    for i in range(0, h, block_size):
+        for j in range(0, w, block_size):
+            block = compensated_frame[i:i+block_size, j:j+block_size].astype(np.float32)
+            obmc_frame[i:i+block_size, j:j+block_size] += block * weight_mask
+            weights[i:i+block_size, j:j+block_size] += weight_mask
+
+    # Normalize the OBMC frame
+    obmc_frame /= weights
+    obmc_frame = np.clip(obmc_frame, 0, 255).astype(np.uint8)
+
+    return obmc_frame
+
+
+def apply_gmc(target_frame, reference_frames, target_index):
     h, w = target_frame.shape
     compensated_frame = np.zeros_like(target_frame)
 
-    # Derive global motion models using the entire frame
-    affine_matrix_0 = derive_affine_motion_model(reference_frames[0], target_frame)
-    perspective_matrix_0 = derive_perspective_motion_model(reference_frames[0], target_frame)
-    affine_matrix_1 = derive_affine_motion_model(reference_frames[1], target_frame)
-    perspective_matrix_1 = derive_perspective_motion_model(reference_frames[1], target_frame)
-
-    if affine_matrix_0 is None or perspective_matrix_0 is None or affine_matrix_1 is None or perspective_matrix_1 is None:
-        raise ValueError("Failed to derive motion models for the entire frame.")
-
-    # Segment the target frame into foreground and background
-    segmentation_mask = segment_foreground_background(target_frame, model)
-
-    # Save the segmentation mask for debugging/visualization
-    # segmentation_mask_filename = f'./processed_output/segmentation_masks/segmentation_mask_{target_index}.png'
-    # cv2.imwrite(segmentation_mask_filename, segmentation_mask)
+    # Derive motion models
+    models = derive_motion_models(reference_frames[0], reference_frames[1], target_frame)
+    best_models = select_best_models(models, target_frame, reference_frames[0], reference_frames[1])
 
     # Process each block in the frame
-    blocks = divide_into_blocks(target_frame, block_size=16)
-    selection_map, std_blocks = generate_selection_map(target_frame, block_size=16)
-    selected_blocks = blocks
+    blocks = divide_into_blocks(target_frame, block_size=BLOCK_SIZE)
+    selection_map, std_blocks = generate_selection_map(target_frame, block_size=BLOCK_SIZE)
 
-    for (i, j, block) in tqdm(selected_blocks, desc="Processing Blocks", unit="block"):
-        ref_block_0 = reference_frames[0][i:i+block.shape[0], j:j+block.shape[1]]
-        ref_block_1 = reference_frames[1][i:i+block.shape[0], j:j+block.shape[1]]
+    assigned_models = assign_models_to_blocks(blocks, best_models, target_frame, reference_frames[0], reference_frames[1])
 
-        # Check if the block is within the bounds of the reference frames
-        if ref_block_0.shape != block.shape or ref_block_1.shape != block.shape:
-            print(f"Skipping block at ({i}, {j}) due to size mismatch.")
-            continue
+    for (block_pos, (model_type, model_0, model_1)) in tqdm(assigned_models, desc="Processing Blocks", unit="block"):
+        i, j = block_pos
+        block = target_frame[i:i+BLOCK_SIZE, j:j+BLOCK_SIZE]
+        ref_block_0 = reference_frames[0][i:i+BLOCK_SIZE, j:j+BLOCK_SIZE]
+        ref_block_1 = reference_frames[1][i:i+BLOCK_SIZE, j:j+BLOCK_SIZE]
 
-        # Determine if the block is foreground or background
-        if np.mean(segmentation_mask[i:i+block.shape[0], j:j+block.shape[1]]) > 128:  # Foreground
-            # Apply the interpolation filter (post-processing)
-            ref_block_0 = apply_interpolation_filter(ref_block_0, filter_index=5)  # Example filter index
-            ref_block_1 = apply_interpolation_filter(ref_block_1, filter_index=5)  # Example filter index
+        # Apply illuminance compensation
+        ref_block_0 = illuminance_compensation(ref_block_0, block)
+        ref_block_1 = illuminance_compensation(ref_block_1, block)
 
-            # Apply illuminance compensation (post-processing)
-            ref_block_0 = illuminance_compensation(ref_block_0, block)
-            ref_block_1 = illuminance_compensation(ref_block_1, block)
-
-            # Apply affine and perspective transforms
-            compensated_block_affine_0 = apply_affine_transform(ref_block_0, affine_matrix_0)
-            compensated_block_perspective_0 = apply_perspective_transform(ref_block_0, perspective_matrix_0)
-            compensated_block_affine_1 = apply_affine_transform(ref_block_1, affine_matrix_1)
-            compensated_block_perspective_1 = apply_perspective_transform(ref_block_1, perspective_matrix_1)
-
-            # Blend the compensated blocks
-            final_blended_block_0 = (compensated_block_affine_0.astype(np.float32) + compensated_block_perspective_0.astype(np.float32)) / 2
-            final_blended_block_1 = (compensated_block_affine_1.astype(np.float32) + compensated_block_perspective_1.astype(np.float32)) / 2
-            final_blended_block = ((final_blended_block_0 + final_blended_block_1) / 2).astype(np.uint8)
-        else:  # Background
-            # Use only the affine transformation for the background
-            compensated_block_affine_0 = apply_affine_transform(ref_block_0, affine_matrix_0)
-            compensated_block_affine_1 = apply_affine_transform(ref_block_1, affine_matrix_1)
-
-            # Blend the compensated blocks
-            final_blended_block = ((compensated_block_affine_0.astype(np.float32) + compensated_block_affine_1.astype(np.float32)) / 2).astype(np.uint8)
-
+        # Apply the selected model to the block
+        compensated_block = blend_models(block, ref_block_0, ref_block_1, model_0, model_1)
         # Update the compensated frame
-        compensated_frame[i:i+block.shape[0], j:j+block.shape[1]] = final_blended_block
+        compensated_frame[i:i+BLOCK_SIZE, j:j+BLOCK_SIZE] = compensated_block
 
+    # POST-PROCESSING below
+    # Apply Overlapped Block Motion Compensation (OBMC)
+    compensated_frame = apply_obmc(compensated_frame, block_size=BLOCK_SIZE)
     # Apply de-blocking filter to the entire compensated frame
-    compensated_frame = deblocking_filter(compensated_frame)
+    compensated_frame = adaptive_deblocking_filter(compensated_frame)
 
     return compensated_frame
 
 
+# def apply_gmc(target_frame, reference_frames, target_index):
+#     h, w = target_frame.shape
+#     compensated_frame = np.zeros_like(target_frame, dtype=np.float32)
 
+#     # Derive global motion models using the entire frame
+#     affine_matrix_0 = derive_affine_motion_model(reference_frames[0], target_frame)
+#     affine_matrix_1 = derive_affine_motion_model(reference_frames[1], target_frame)
+
+#     # Apply the interpolation filter (post-processing)
+#     reference_frames[0] = apply_interpolation_filter(reference_frames[0], filter_index=2)  # Example filter index
+#     reference_frames[1] = apply_interpolation_filter(reference_frames[1], filter_index=2)  # Example filter index
+
+#     # Apply illuminance compensation (post-processing)
+#     reference_frames[0] = illuminance_compensation(reference_frames[0], target_frame)
+#     reference_frames[1] = illuminance_compensation(reference_frames[1], target_frame)
+
+#     if affine_matrix_0 is None or affine_matrix_1 is None:
+#         raise ValueError("Failed to derive motion models for the entire frame.")
+
+#     # Apply affine transform to the entire reference frames
+#     compensated_frame_0 = apply_affine_transform(reference_frames[0], affine_matrix_0)
+#     compensated_frame_1 = apply_affine_transform(reference_frames[1], affine_matrix_1)
+
+#     # Blend the compensated frames
+#     compensated_frame = (compensated_frame_0.astype(np.float32) + compensated_frame_1.astype(np.float32)) / 2
+
+#     # Apply de-blocking filter to the entire compensated frame
+#     compensated_frame = deblocking_filter(compensated_frame.astype(np.uint8))
+
+#     # Apply Joint Bilateral Filter (JBF)
+#     compensated_frame = cv2.ximgproc.jointBilateralFilter(
+#         joint=compensated_frame,
+#         src=target_frame,
+#         d=1,
+#         sigmaColor=75,
+#         sigmaSpace=75
+#     )
+
+#     return compensated_frame
