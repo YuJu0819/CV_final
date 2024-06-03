@@ -1,0 +1,13 @@
+gt
+filteroutput
+output
+par_output
+solution
+selection_map
+/*.png
+
+/*.zip
+
+MediaTek_Materials/DaylightRoad2_27.yuv
+MediaTek_Materials/__pycache__
+
