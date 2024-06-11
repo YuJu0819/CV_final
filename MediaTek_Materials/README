@@ -1,0 +1,6 @@
+first, convert yuv2png files and save them in directory gt
+second, to install the required package, type 
+    pip install -r requirements.txt
+to execute the code, type 
+    python main.py 
+it will be save at ./output
